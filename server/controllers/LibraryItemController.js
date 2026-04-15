@@ -1131,7 +1131,17 @@ class LibraryItemController {
     // Compute start offset of the selected file within the combined book timeline.
     // ABS stores chapters across all audio files with global timestamps — we need
     // to filter to only chapters belonging to this file and convert to file-relative times.
-    const chapters = LibraryItemController.getChaptersForAudioFile(allChapters, audioFile, includedAudioFiles)
+    let chapters = LibraryItemController.getChaptersForAudioFile(allChapters, audioFile, includedAudioFiles)
+
+    // Fallback for parallel-format items (e.g. a library item with both an .m4b and .mp3
+    // of the same content). ABS treats them as sequential tracks, so the non-primary file's
+    // sequential offset exceeds all chapter timestamps. When that happens, apply the chapters
+    // as if this file starts at 0 — the timestamps are valid within this file too.
+    if (!chapters.length) {
+      chapters = allChapters
+        .filter((ch) => ch.start >= 0 && ch.start < (audioFile.duration || 0))
+        .map((ch) => ({ ...ch, end: Math.min(ch.end, audioFile.duration || 0) }))
+    }
 
     const inputPath = audioFile.metadata.path
     const inputExt = Path.extname(audioFile.metadata.filename)
