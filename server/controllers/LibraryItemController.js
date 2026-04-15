@@ -1157,33 +1157,37 @@ class LibraryItemController {
 
       const padLength = chapters.length.toString().length
 
-      // Split all chapters in parallel — all reads from the same input, different output paths
-      await Promise.all(
-        chapters.map(async (chapter, i) => {
-          const duration = chapter.end - chapter.start
-          if (duration <= 0) return
+      // Split chapters with bounded concurrency to avoid spawning too many ffmpeg
+      // processes simultaneously (OOM risk on large books with many chapters).
+      const CONCURRENCY = 4
+      const splitChapter = async (chapter, i) => {
+        const duration = chapter.end - chapter.start
+        if (duration <= 0) return
 
-          const paddedNum = String(i + 1).padStart(padLength, '0')
-          const safeTitle = (chapter.title || `Chapter ${i + 1}`).replace(/[/\\:*?"<>|]/g, '_').trim()
-          const outputFilename = `${paddedNum} - ${safeTitle}${inputExt}`
-          const outputPath = Path.join(itemCacheDir, outputFilename)
+        const paddedNum = String(i + 1).padStart(padLength, '0')
+        const safeTitle = (chapter.title || `Chapter ${i + 1}`).replace(/[/\\:*?"<>|]/g, '_').trim()
+        const outputFilename = `${paddedNum} - ${safeTitle}${inputExt}`
+        const outputPath = Path.join(itemCacheDir, outputFilename)
 
-          await new Promise((resolve, reject) => {
-            Ffmpeg(inputPath)
-              .seekInput(chapter.start)
-              .duration(duration)
-              .outputOptions('-map 0:a')
-              .audioCodec('copy')
-              .output(outputPath)
-              .on('end', resolve)
-              .on('error', (err) => {
-                Logger.error(`[LibraryItemController] ffmpeg error splitting chapter "${chapter.title}": ${err.message}`)
-                reject(err)
-              })
-              .run()
-          })
+        await new Promise((resolve, reject) => {
+          Ffmpeg(inputPath)
+            .seekInput(chapter.start)
+            .duration(duration)
+            .outputOptions('-map 0:a')
+            .audioCodec('copy')
+            .output(outputPath)
+            .on('end', resolve)
+            .on('error', (err) => {
+              Logger.error(`[LibraryItemController] ffmpeg error splitting chapter "${chapter.title}": ${err.message}`)
+              reject(err)
+            })
+            .run()
         })
-      )
+      }
+
+      for (let i = 0; i < chapters.length; i += CONCURRENCY) {
+        await Promise.all(chapters.slice(i, i + CONCURRENCY).map((ch, j) => splitChapter(ch, i + j)))
+      }
 
       // Stream zip to client
       const zipFilename = `${safeBookTitle} - Chapters.zip`
