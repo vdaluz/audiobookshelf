@@ -1157,12 +1157,30 @@ class LibraryItemController {
 
       const padLength = chapters.length.toString().length
 
-      // Split chapters with bounded concurrency to avoid spawning too many ffmpeg
-      // processes simultaneously (OOM risk on large books with many chapters).
-      const CONCURRENCY = 4
-      const splitChapter = async (chapter, i) => {
+      // Start streaming the ZIP immediately so the HTTP connection stays alive
+      // while chapters are being split. Without this, a large book (70+ chapters)
+      // can exceed proxy timeouts before a single byte is sent.
+      const zipFilename = `${safeBookTitle} - Chapters.zip`
+      res.attachment(zipFilename)
+      const archive = archiver('zip', { zlib: { level: 0 } })
+
+      const archivePromise = new Promise((resolve, reject) => {
+        res.on('close', resolve)
+        res.on('finish', resolve)
+        archive.on('error', reject)
+        archive.on('warning', (err) => {
+          if (err.code !== 'ENOENT') reject(err)
+          else Logger.warn(`[LibraryItemController] Archiver warning: ${err.message}`)
+        })
+      })
+      archive.pipe(res)
+
+      // Split and stream chapters sequentially — avoids OOM from too many concurrent
+      // ffmpeg processes and keeps the archive stream flowing throughout.
+      for (let i = 0; i < chapters.length; i++) {
+        const chapter = chapters[i]
         const duration = chapter.end - chapter.start
-        if (duration <= 0) return
+        if (duration <= 0) continue
 
         const paddedNum = String(i + 1).padStart(padLength, '0')
         const safeTitle = (chapter.title || `Chapter ${i + 1}`).replace(/[/\\:*?"<>|]/g, '_').trim()
@@ -1183,31 +1201,12 @@ class LibraryItemController {
             })
             .run()
         })
+
+        archive.file(outputPath, { name: outputFilename })
       }
 
-      for (let i = 0; i < chapters.length; i += CONCURRENCY) {
-        await Promise.all(chapters.slice(i, i + CONCURRENCY).map((ch, j) => splitChapter(ch, i + j)))
-      }
-
-      // Stream zip to client
-      const zipFilename = `${safeBookTitle} - Chapters.zip`
-      res.attachment(zipFilename)
-
-      const archive = archiver('zip', { zlib: { level: 0 } })
-
-      await new Promise((resolve, reject) => {
-        res.on('close', resolve)
-        res.on('end', resolve)
-        archive.on('error', reject)
-        archive.on('warning', (err) => {
-          if (err.code !== 'ENOENT') reject(err)
-          else Logger.warn(`[LibraryItemController] Archiver warning: ${err.message}`)
-        })
-
-        archive.pipe(res)
-        archive.directory(itemCacheDir, false)
-        archive.finalize()
-      })
+      archive.finalize()
+      await archivePromise
 
       Logger.info(`[LibraryItemController] Chapter download complete for "${bookTitle}"`)
     } catch (error) {
